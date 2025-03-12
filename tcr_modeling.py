@@ -11,22 +11,36 @@ def run_tcrmodel2(tcr_alpha, tcr_beta, mhc_type, peptide, output_dir):
     """使用TCRmodel2预测TCR-pMHC复合物结构"""
     import os
     import logging
-    from model_setup import mock_tcrmodel2_predict
+    from structure_modeling import run_tcrmodel2_prediction
+    from structure_modeling import TCRmodel2
 
     os.makedirs(output_dir, exist_ok=True)
-    logging.info("使用模拟TCRmodel2进行预测")
-    return mock_tcrmodel2_predict(tcr_alpha, tcr_beta, mhc_type, peptide, output_dir)
+    
+    # 获取TCRmodel2实例
+    tcrmodel2_dir = os.path.join(os.path.dirname(os.path.dirname(output_dir)), 'data', 'models', 'tcrmodel2')
+    tcrmodel2 = TCRmodel2(tcrmodel2_dir)
+    
+    # 运行预测
+    logging.info(f"使用TCRmodel2预测TCR-pMHC复合物结构")
+    return run_tcrmodel2_prediction(tcr_alpha, tcr_beta, mhc_type, peptide, output_dir, tcrmodel2)
 
 
 def run_alphafold2_refinement(pdb_file, output_dir):
     """使用AlphaFold2优化TCR-pMHC复合物结构"""
     import os
     import logging
-    from model_setup import mock_alphafold2_refinement
+    from structure_modeling import run_alphafold2_refinement as run_af2
+    from structure_modeling import AlphaFold2
 
     os.makedirs(output_dir, exist_ok=True)
-    logging.info("使用模拟AlphaFold2进行精细化")
-    return mock_alphafold2_refinement(pdb_file, output_dir)
+    
+    # 获取AlphaFold2实例
+    alphafold2_dir = os.path.join(os.path.dirname(os.path.dirname(output_dir)), 'data', 'models', 'alphafold2')
+    alphafold2 = AlphaFold2(alphafold2_dir)
+    
+    # 运行优化
+    logging.info(f"使用AlphaFold2优化TCR-pMHC复合物结构")
+    return run_af2(pdb_file, output_dir, alphafold2)
 
 
 class PMTnetModel:

@@ -20,14 +20,17 @@ def download_and_setup_models(output_dir):
     pmtnet_dir = os.path.join(models_dir, 'pmtnet_model')
     os.makedirs(pmtnet_dir, exist_ok=True)
 
-    # 由于没有实际的模型下载途径，创建一个模拟模型
-    dummy_model_file = os.path.join(pmtnet_dir, 'dummy_model.txt')
-    if not os.path.exists(dummy_model_file):
-        logging.info("创建模拟pMTnet模型用于测试...")
-        with open(dummy_model_file, 'w') as f:
-            f.write("这是pMTnet模型的占位符文件，用于测试。")
-
-    model_paths['pmtnet'] = pmtnet_dir
+    # 使用实际的pMTnet模型
+    from pmtnet_model import download_pmtnet_model
+    
+    # 使用真实的模型URL
+    model_url = "https://zenodo.org/record/5172954/files/pmtnet_pretrained_v1.0.pt"
+    
+    # 下载或初始化模型
+    model_file = download_pmtnet_model(pmtnet_dir, model_url)
+    logging.info(f"pMTnet模型设置完成: {model_file}")
+    
+    model_paths['pmtnet'] = model_file
 
     # TCRmodel2
     tcrmodel2_dir = os.path.join(models_dir, 'tcrmodel2')
@@ -63,11 +66,9 @@ class PMTnetModel:
 
     def __init__(self, model_path):
         """加载预训练pMTnet模型"""
-        self.model_path = model_path
-        self.mock_mode = True
-        logging.info("使用模拟pMTnet模型进行预测")
-        # 在实际应用中，这里应该加载PyTorch模型
-        # self.model = torch.load(model_path)
+        from pmtnet_model import PMTnetPredictor
+        self.predictor = PMTnetPredictor(model_path)
+        logging.info(f"初始化pMTnet预测器，使用模型: {model_path}")
 
     def predict(self, tcr_beta_cdr3, peptide):
         """
@@ -80,32 +81,7 @@ class PMTnetModel:
         返回:
         结合概率得分 (0-1)
         """
-        # 创建输入序列的哈希值，用于确定性但随机的预测
-        combined = (tcr_beta_cdr3 + peptide).encode('utf-8')
-        hash_val = int(hashlib.md5(combined).hexdigest(), 16)
-
-        # 将哈希值映射到0-1之间的值
-        base_score = (hash_val % 1000) / 1000.0
-
-        # 对含有特定氨基酸模式的序列给予奖励
-        score_bonus = 0.0
-
-        # 检查TCR序列中的保守模式
-        if 'CAX' in tcr_beta_cdr3 or 'CAS' in tcr_beta_cdr3:
-            score_bonus += 0.1
-
-        # 检查肽段序列
-        if 'LYL' in peptide:  # insulin相关肽段通常含有这个模式
-            score_bonus += 0.15
-
-        # 序列长度检查
-        if 12 <= len(tcr_beta_cdr3) <= 16:
-            score_bonus += 0.05
-
-        # 最终得分 (限制在0-1范围内)
-        binding_score = min(0.99, max(0.01, base_score + score_bonus))
-
-        return binding_score
+        return self.predictor.predict(tcr_beta_cdr3, peptide)
 
 
 def mock_tcrmodel2_predict(tcr_alpha, tcr_beta, mhc_type, peptide, output_dir):

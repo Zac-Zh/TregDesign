@@ -2,10 +2,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
+import logging
 from sklearn.preprocessing import MinMaxScaler
+from tcr_reconstruction import reconstruct_tcr_sequences_batch
 
 
-def integrate_tcr_predictions(binding_df, models_df, treg_phenotype_df, output_file):
+def integrate_tcr_predictions(binding_df, models_df, treg_phenotype_df, output_file, reference_dir='data/reference'):
     """
     整合不同预测结果，对TCR进行排序和选择
 
@@ -14,44 +17,72 @@ def integrate_tcr_predictions(binding_df, models_df, treg_phenotype_df, output_f
     models_df: 结构模型结果
     treg_phenotype_df: Treg表型数据
     output_file: 输出文件路径
+    reference_dir: IMGT参考数据目录，用于重建TCR序列
 
     返回:
     ranked_tcrs: 排序后的TCR候选清单
     """
+    # 检查并确保binding_df中有tcr_id列
+    if 'tcr_id' not in binding_df.columns and 'cell_id' in binding_df.columns:
+        binding_df['tcr_id'] = binding_df['cell_id']
+    
+    # 检查并确保models_df中有tcr_id列
+    if models_df is not None and len(models_df) > 0:
+        if 'tcr_id' not in models_df.columns and 'cell_id' in models_df.columns:
+            models_df['tcr_id'] = models_df['cell_id']
+    
+    # 检查并确保treg_phenotype_df中有cell_id列作为主键
+    if 'cell_id' not in treg_phenotype_df.columns:
+        raise ValueError("Treg表型数据中缺少'cell_id'列")
+    
     # 合并结构模型和结合预测结果
-    merged_df = pd.merge(
-        binding_df,
-        models_df,
-        left_on=['tcr_id', 'peptide'],
-        right_on=['tcr_id', 'peptide_id'],
-        how='inner'
-    )
-
-    # 合并Treg表型数据
+    if models_df is not None and len(models_df) > 0:
+        merged_df = pd.merge(
+            binding_df,
+            models_df,
+            left_on=['tcr_id', 'peptide'],
+            right_on=['tcr_id', 'peptide_id'],
+            how='left'
+        )
+    else:
+        merged_df = binding_df.copy()
+    
+    # 合并Treg表型数据 - 使用明确的left_on和right_on参数
     final_df = pd.merge(
         merged_df,
         treg_phenotype_df,
         left_on='tcr_id',
         right_on='cell_id',
-        how='inner'
+        how='left'
     )
+
+    # 确保final_df中有tcr_id列
+    if 'tcr_id' not in final_df.columns and 'cell_id' in final_df.columns:
+        final_df['tcr_id'] = final_df['cell_id']
+    elif 'cell_id' in final_df.columns and 'tcr_id' in final_df.columns:
+        # 如果两列都存在，确保tcr_id列有值
+        final_df['tcr_id'] = final_df['tcr_id'].fillna(final_df['cell_id'])
 
     # 标准化评分指标
     scaler = MinMaxScaler()
     for column in ['binding_score', 'contact_count', 'interface_energy', 'confidence']:
-        if column in final_df.columns:
-            final_df[f'{column}_scaled'] = scaler.fit_transform(final_df[[column]])
+        if column in final_df.columns and not final_df[column].isnull().all():
+            # 确保列中有非空值
+            final_df[f'{column}_scaled'] = scaler.fit_transform(final_df[[column]].fillna(0))
+        else:
+            # 如果列不存在或全为空值，创建默认值
+            final_df[f'{column}_scaled'] = 0
 
     # 计算综合评分
     final_df['composite_score'] = (
             final_df['binding_score_scaled'] * 0.4 +
-            final_df['confidence_scaled'] * 0.3 +
-            final_df['contact_count_scaled'] * 0.15 +
-            final_df['interface_energy_scaled'] * 0.15
+            final_df.get('confidence_scaled', 0) * 0.3 +
+            final_df.get('contact_count_scaled', 0) * 0.15 +
+            final_df.get('interface_energy_scaled', 0) * 0.15
     )
 
     # Treg表型加分
-    if 'TGFB1' in final_df.columns and 'IL10' in final_df.columns:
+    if 'FOXP3' in final_df.columns and 'TGFB1' in final_df.columns and 'IL10' in final_df.columns:
         final_df['treg_quality'] = (
                 final_df['FOXP3'] * 0.4 +
                 final_df['TGFB1'] * 0.3 +
@@ -66,6 +97,22 @@ def integrate_tcr_predictions(binding_df, models_df, treg_phenotype_df, output_f
     else:
         final_df['final_score'] = final_df['composite_score']
 
+    # 重建TCR序列
+    logging.info("重建TCR完整序列...")
+    # 确保DataFrame包含必要的列
+    required_cols = ['alpha_v', 'alpha_j', 'alpha_cdr3', 'beta_v', 'beta_j', 'beta_cdr3']
+    missing_cols = [col for col in required_cols if col not in final_df.columns]
+    
+    if not missing_cols:
+        try:
+            # 重建TCR序列
+            final_df = reconstruct_tcr_sequences_batch(final_df, reference_dir)
+            logging.info("TCR序列重建完成")
+        except Exception as e:
+            logging.error(f"TCR序列重建失败: {str(e)}")
+    else:
+        logging.warning(f"缺少重建TCR序列所需的列: {missing_cols}")
+    
     # 根据最终评分排序
     ranked_tcrs = final_df.sort_values('final_score', ascending=False)
 
@@ -92,68 +139,81 @@ def generate_tcr_report(ranked_tcrs, output_file, top_n=20):
     output_file: 输出文件路径
     top_n: 报告中包含的顶部候选数量
     """
-    # 选择前N个候选TCR
+    # 选择顶部候选
     top_tcrs = ranked_tcrs.head(top_n)
 
     # 创建HTML报告
-    html = "<html><head><title>HLA-DQ8-Insulin Specific Treg TCR Candidates</title>"
-    html += "<style>body{font-family:Arial;margin:20px} table{border-collapse:collapse;width:100%}"
-    html += "th,td{border:1px solid #ddd;padding:8px} tr:nth-child(even){background-color:#f2f2f2}"
-    html += "th{padding-top:12px;padding-bottom:12px;text-align:left;background-color:#4CAF50;color:white}</style></head>"
-    html += "<body><h1>HLA-DQ8-Insulin Specific Treg TCR Candidates</h1>"
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>TCR候选报告</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1 {{ color: #2c3e50; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; color: #333; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .score-high {{ color: #27ae60; font-weight: bold; }}
+            .score-medium {{ color: #f39c12; }}
+            .score-low {{ color: #e74c3c; }}
+        </style>
+    </head>
+    <body>
+        <h1>HLA-DQ8-胰岛素特异性Treg TCR候选</h1>
+        <p>以下是排名前{top_n}的TCR候选，按结合特异性和Treg功能排序：</p>
+        <table>
+            <tr>
+                <th>排名</th>
+                <th>TCR ID</th>
+                <th>α链CDR3</th>
+                <th>α链核苷酸序列</th>
+                <th>β链CDR3</th>
+                <th>β链核苷酸序列</th>
+                <th>肽段</th>
+                <th>结合评分</th>
+                <th>结构评分</th>
+                <th>Treg质量</th>
+                <th>总评分</th>
+            </tr>
+    """
 
-    # 添加摘要表格
-    html += "<h2>Top " + str(top_n) + " TCR Candidates Summary</h2>"
-    html += "<table><tr><th>Rank</th><th>TCR ID</th><th>Alpha CDR3</th><th>Beta CDR3</th>"
-    html += "<th>Peptide</th><th>Binding Score</th><th>Final Score</th></tr>"
-
-    for i, (_, row) in enumerate(top_tcrs.iterrows()):
-        # 使用alpha_cdr3_x字段，如果不存在则尝试使用alpha_cdr3_y，如果都不存在则使用alpha_cdr3
-        alpha_cdr3 = row.get('alpha_cdr3_x', row.get('alpha_cdr3_y', row.get('alpha_cdr3', 'N/A')))
-        beta_cdr3 = row.get('beta_cdr3_x', row.get('beta_cdr3_y', row.get('beta_cdr3', 'N/A')))
+    # 添加每个TCR的行
+    for i, (idx, row) in enumerate(top_tcrs.iterrows()):
+        # 确定评分颜色类
+        binding_class = "score-high" if row.get('binding_score', 0) > 0.7 else "score-medium" if row.get('binding_score', 0) > 0.4 else "score-low"
+        final_class = "score-high" if row['final_score'] > 0.7 else "score-medium" if row['final_score'] > 0.4 else "score-low"
         
-        html += f"<tr><td>{i + 1}</td><td>{row['tcr_id']}</td><td>{alpha_cdr3}</td>"
-        html += f"<td>{beta_cdr3}</td><td>{row['peptide']}</td>"
-        html += f"<td>{row['binding_score']:.3f}</td><td>{row['final_score']:.3f}</td></tr>"
+        html_content += f"""
+            <tr>
+                <td>{i+1}</td>
+                <td>{row.get('tcr_id', 'N/A')}</td>
+                <td>{row.get('alpha_cdr3', 'N/A')}</td>
+                <td>{row.get('alpha_nt', 'N/A')}</td>
+                <td>{row.get('beta_cdr3', 'N/A')}</td>
+                <td>{row.get('beta_nt', 'N/A')}</td>
+                <td>{row.get('peptide', 'N/A')}</td>
+                <td class="{binding_class}">{row.get('binding_score', 0):.3f}</td>
+                <td>{row.get('confidence', 0):.3f}</td>
+                <td>{row.get('treg_quality', 0):.3f}</td>
+                <td class="{final_class}">{row['final_score']:.3f}</td>
+            </tr>
+        """
 
-    html += "</table>"
-
-    # 添加详细信息
-    html += "<h2>Detailed Information for Top Candidates</h2>"
-
-    for i, (_, row) in enumerate(top_tcrs.head(5).iterrows()):
-        html += f"<h3>{i + 1}. TCR {row['tcr_id']}</h3>"
-        html += "<h4>Sequence Information</h4>"
-        # 使用alpha_cdr3_x字段，如果不存在则尝试使用alpha_cdr3_y，如果都不存在则使用alpha_cdr3
-        alpha_cdr3 = row.get('alpha_cdr3_x', row.get('alpha_cdr3_y', row.get('alpha_cdr3', 'N/A')))
-        beta_cdr3 = row.get('beta_cdr3_x', row.get('beta_cdr3_y', row.get('beta_cdr3', 'N/A')))
-        
-        html += f"<p><strong>Alpha Chain CDR3:</strong> {alpha_cdr3}</p>"
-        html += f"<p><strong>Beta Chain CDR3:</strong> {beta_cdr3}</p>"
-
-        html += "<h4>Binding Prediction</h4>"
-        html += f"<p><strong>Peptide:</strong> {row['peptide']}</p>"
-        html += f"<p><strong>Binding Score:</strong> {row['binding_score']:.3f}</p>"
-
-        html += "<h4>Structural Model</h4>"
-        html += f"<p><strong>Contact Count:</strong> {row['contact_count']}</p>"
-        html += f"<p><strong>Interface Energy:</strong> {row['interface_energy']:.2f}</p>"
-        html += f"<p><strong>Model Confidence:</strong> {row['confidence']:.3f}</p>"
-
-        if 'FOXP3' in row:
-            html += "<h4>Treg Phenotype</h4>"
-            html += f"<p><strong>FOXP3 Expression:</strong> {row['FOXP3']:.2f}</p>"
-            html += f"<p><strong>IL2RA (CD25) Expression:</strong> {row['IL2RA']:.2f}</p>"
-            if 'TGFB1' in row:
-                html += f"<p><strong>TGFB1 Expression:</strong> {row['TGFB1']:.2f}</p>"
-            if 'IL10' in row:
-                html += f"<p><strong>IL10 Expression:</strong> {row['IL10']:.2f}</p>"
-
-    html += "</body></html>"
+    # 完成HTML
+    html_content += """
+        </table>
+        <p>注：结合评分表示TCR与肽段的结合亲和力；结构评分表示TCR-pMHC复合物的结构质量；Treg质量表示调节性T细胞的功能特性。</p>
+    </body>
+    </html>
+    """
 
     # 保存HTML报告
     with open(output_file, 'w') as f:
-        f.write(html)
+        f.write(html_content)
+
+    return output_file
 
 
 if __name__ == "__main__":

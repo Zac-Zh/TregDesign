@@ -175,7 +175,7 @@ def check_and_install_dependencies():
     import subprocess
 
     required_packages = [
-        'scanpy', 'pandas', 'numpy', 'matplotlib', 'seaborn',
+            'scanpy', 'pandas', 'numpy', 'matplotlib', 'seaborn',
         'biopython', 'torch', 'scikit-learn', 'requests'
     ]
 

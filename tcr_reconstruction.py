@@ -251,32 +251,42 @@ def reconstruct_tcr_sequences_batch(tcr_df, reference_dir):
     # 下载或加载参考数据
     reference_data = download_imgt_reference_data(reference_dir)
     
-    # 创建结果列
-    tcr_df['alpha_nt'] = ''
-    tcr_df['alpha_aa'] = ''
-    tcr_df['beta_nt'] = ''
-    tcr_df['beta_aa'] = ''
+    # 创建结果列（如果不存在）
+    if 'alpha_nt' not in tcr_df.columns:
+        tcr_df['alpha_nt'] = ''
+    if 'alpha_aa' not in tcr_df.columns:
+        tcr_df['alpha_aa'] = ''
+    if 'beta_nt' not in tcr_df.columns:
+        tcr_df['beta_nt'] = ''
+    if 'beta_aa' not in tcr_df.columns:
+        tcr_df['beta_aa'] = ''
     
     # 对每个TCR进行序列重建
     for idx, row in tcr_df.iterrows():
         try:
+            # 处理alpha链CDR3列名可能的不一致
+            alpha_cdr3 = row.get('alpha_cdr3_y', row.get('alpha_cdr3_x', row.get('alpha_cdr3', None)))
+            beta_cdr3 = row.get('beta_cdr3_y', row.get('beta_cdr3_x', row.get('beta_cdr3', None)))
+            
             # 重建alpha链序列
-            if pd.notna(row['alpha_v']) and pd.notna(row['alpha_j']) and pd.notna(row['alpha_cdr3']):
+            if pd.notna(row.get('alpha_v')) and pd.notna(row.get('alpha_j')) and pd.notna(alpha_cdr3):
                 alpha_nt, alpha_aa = reconstruct_tcr_sequence(
-                    row['alpha_v'], row['alpha_j'], row['alpha_cdr3'], 'alpha', reference_data
+                    row['alpha_v'], row['alpha_j'], alpha_cdr3, 'alpha', reference_data
                 )
                 tcr_df.at[idx, 'alpha_nt'] = alpha_nt
                 tcr_df.at[idx, 'alpha_aa'] = alpha_aa
+                logging.info(f"重建TCR alpha链序列成功 (ID: {row.get('cell_id', row.get('tcr_id', idx))})")
             
             # 重建beta链序列
-            if pd.notna(row['beta_v']) and pd.notna(row['beta_j']) and pd.notna(row['beta_cdr3']):
+            if pd.notna(row.get('beta_v')) and pd.notna(row.get('beta_j')) and pd.notna(beta_cdr3):
                 beta_nt, beta_aa = reconstruct_tcr_sequence(
-                    row['beta_v'], row['beta_j'], row['beta_cdr3'], 'beta', reference_data
+                    row['beta_v'], row['beta_j'], beta_cdr3, 'beta', reference_data
                 )
                 tcr_df.at[idx, 'beta_nt'] = beta_nt
                 tcr_df.at[idx, 'beta_aa'] = beta_aa
+                logging.info(f"重建TCR beta链序列成功 (ID: {row.get('cell_id', row.get('tcr_id', idx))})")
         except Exception as e:
-            logging.error(f"重建TCR序列出错 (ID: {row.get('cell_id', idx)}): {str(e)}")
+            logging.error(f"重建TCR序列出错 (ID: {row.get('cell_id', row.get('tcr_id', idx))}): {str(e)}")
     
     return tcr_df
 

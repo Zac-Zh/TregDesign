@@ -50,7 +50,17 @@ class PMTnetModel:
 
     def __init__(self, model_path):
         """加载预训练的pMTnet模型"""
-        self.model = torch.load(model_path) if os.path.isfile(model_path) else None
+        try:
+            # 尝试直接从pmtnet_model.py导入预测器
+            from pmtnet_model import PMTnetPredictor
+            self.predictor = PMTnetPredictor(model_path)
+            self.use_direct_predictor = True
+            logging.info(f"成功初始化pMTnet预测器，使用模型: {model_path}")
+        except Exception as e:
+            logging.warning(f"无法初始化pMTnet预测器: {str(e)}")
+            logging.info("尝试使用备选方法加载模型")
+            self.model = torch.load(model_path) if os.path.isfile(model_path) else None
+            self.use_direct_predictor = False
 
     def predict(self, tcr_beta_cdr3, peptide):
         """
@@ -63,23 +73,38 @@ class PMTnetModel:
         返回:
         结合概率得分 (0-1)
         """
-        # 准备输入
-        if self.model is not None:
-            # 实际使用PyTorch模型进行预测
-            with torch.no_grad():
-                # 这里假设模型接受两个序列作为输入
-                # 实际实现需要根据模型的具体要求进行调整
-                beta_tensor = torch.tensor([ord(c) for c in tcr_beta_cdr3]).unsqueeze(0)
-                peptide_tensor = torch.tensor([ord(c) for c in peptide]).unsqueeze(0)
-                
-                # 假设模型返回一个概率值
-                prediction = self.model((beta_tensor, peptide_tensor))
-                return prediction.item()
-        else:
-            # 使用模拟预测逻辑
+        # 首先尝试使用直接预测器
+        if hasattr(self, 'use_direct_predictor') and self.use_direct_predictor:
+            try:
+                return self.predictor.predict(tcr_beta_cdr3, peptide)
+            except Exception as e:
+                logging.error(f"使用pMTnet预测器预测失败: {str(e)}")
+                logging.info("切换到备选预测方法")
+        
+        # 如果直接预测器不可用或失败，尝试使用加载的模型
+        if hasattr(self, 'model') and self.model is not None:
+            try:
+                # 实际使用PyTorch模型进行预测
+                with torch.no_grad():
+                    # 这里假设模型接受两个序列作为输入
+                    beta_tensor = torch.tensor([ord(c) for c in tcr_beta_cdr3]).unsqueeze(0)
+                    peptide_tensor = torch.tensor([ord(c) for c in peptide]).unsqueeze(0)
+                    
+                    # 假设模型返回一个概率值
+                    prediction = self.model((beta_tensor, peptide_tensor))
+                    return prediction.item()
+            except Exception as e:
+                logging.error(f"使用加载模型预测失败: {str(e)}")
+        
+        # 如果上述方法都失败，使用model_setup中的模型
+        try:
             from model_setup import PMTnetModel as MockPMTnetModel
             mock_model = MockPMTnetModel(model_path)
             return mock_model.predict(tcr_beta_cdr3, peptide)
+        except Exception as e:
+            logging.error(f"所有预测方法都失败: {str(e)}")
+            # 返回一个默认值
+            return 0.5
 
 
 def predict_tcr_binding(tcr_df, peptides, model_path, output_file):

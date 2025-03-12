@@ -100,18 +100,42 @@ def integrate_tcr_predictions(binding_df, models_df, treg_phenotype_df, output_f
     # 重建TCR序列
     logging.info("重建TCR完整序列...")
     # 确保DataFrame包含必要的列
-    required_cols = ['alpha_v', 'alpha_j', 'alpha_cdr3', 'beta_v', 'beta_j', 'beta_cdr3']
-    missing_cols = [col for col in required_cols if col not in final_df.columns]
+    # 检查V和J基因列
+    v_j_cols = ['alpha_v', 'alpha_j', 'beta_v', 'beta_j']
+    missing_v_j_cols = [col for col in v_j_cols if col not in final_df.columns]
     
-    if not missing_cols:
+    # 检查CDR3列，考虑可能的列名变体
+    has_alpha_cdr3 = any(col in final_df.columns for col in ['alpha_cdr3', 'alpha_cdr3_x', 'alpha_cdr3_y'])
+    has_beta_cdr3 = any(col in final_df.columns for col in ['beta_cdr3', 'beta_cdr3_x', 'beta_cdr3_y'])
+    
+    if not missing_v_j_cols and has_alpha_cdr3 and has_beta_cdr3:
         try:
             # 重建TCR序列
             final_df = reconstruct_tcr_sequences_batch(final_df, reference_dir)
             logging.info("TCR序列重建完成")
+            
+            # 检查是否成功生成了核苷酸序列
+            alpha_nt_count = final_df['alpha_nt'].notna().sum()
+            beta_nt_count = final_df['beta_nt'].notna().sum()
+            logging.info(f"成功重建 {alpha_nt_count} 个alpha链和 {beta_nt_count} 个beta链核苷酸序列")
+            
         except Exception as e:
             logging.error(f"TCR序列重建失败: {str(e)}")
     else:
-        logging.warning(f"缺少重建TCR序列所需的列: {missing_cols}")
+        if missing_v_j_cols:
+            logging.warning(f"缺少重建TCR序列所需的V/J基因列: {missing_v_j_cols}")
+        if not has_alpha_cdr3:
+            logging.warning("缺少alpha链CDR3序列信息")
+        if not has_beta_cdr3:
+            logging.warning("缺少beta链CDR3序列信息")
+        
+        logging.info("尝试使用可用的CDR3信息进行序列重建...")
+        try:
+            # 即使缺少一些列，也尝试重建可能的序列
+            final_df = reconstruct_tcr_sequences_batch(final_df, reference_dir)
+            logging.info("部分TCR序列重建完成")
+        except Exception as e:
+            logging.error(f"部分TCR序列重建失败: {str(e)}")
     
     # 根据最终评分排序
     ranked_tcrs = final_df.sort_values('final_score', ascending=False)
@@ -158,6 +182,7 @@ def generate_tcr_report(ranked_tcrs, output_file, top_n=20):
             .score-high {{ color: #27ae60; font-weight: bold; }}
             .score-medium {{ color: #f39c12; }}
             .score-low {{ color: #e74c3c; }}
+            .sequence {{ font-family: monospace; font-size: 0.85em; word-break: break-all; }}
         </style>
     </head>
     <body>
@@ -185,14 +210,33 @@ def generate_tcr_report(ranked_tcrs, output_file, top_n=20):
         binding_class = "score-high" if row.get('binding_score', 0) > 0.7 else "score-medium" if row.get('binding_score', 0) > 0.4 else "score-low"
         final_class = "score-high" if row['final_score'] > 0.7 else "score-medium" if row['final_score'] > 0.4 else "score-low"
         
+        # 获取CDR3序列，处理可能的列名不一致
+        alpha_cdr3 = row.get('alpha_cdr3_y', row.get('alpha_cdr3_x', row.get('alpha_cdr3', 'N/A')))
+        beta_cdr3 = row.get('beta_cdr3_y', row.get('beta_cdr3_x', row.get('beta_cdr3', 'N/A')))
+        
+        # 获取核苷酸序列
+        alpha_nt = row.get('alpha_nt', 'N/A')
+        beta_nt = row.get('beta_nt', 'N/A')
+        
+        # 如果序列太长，添加省略号
+        if len(str(alpha_nt)) > 50 and alpha_nt != 'N/A':
+            alpha_nt_display = f"{alpha_nt[:50]}...（共{len(alpha_nt)}个碱基）"
+        else:
+            alpha_nt_display = alpha_nt
+            
+        if len(str(beta_nt)) > 50 and beta_nt != 'N/A':
+            beta_nt_display = f"{beta_nt[:50]}...（共{len(beta_nt)}个碱基）"
+        else:
+            beta_nt_display = beta_nt
+        
         html_content += f"""
             <tr>
                 <td>{i+1}</td>
                 <td>{row.get('tcr_id', 'N/A')}</td>
-                <td>{row.get('alpha_cdr3', 'N/A')}</td>
-                <td>{row.get('alpha_nt', 'N/A')}</td>
-                <td>{row.get('beta_cdr3', 'N/A')}</td>
-                <td>{row.get('beta_nt', 'N/A')}</td>
+                <td>{alpha_cdr3}</td>
+                <td class="sequence">{alpha_nt_display}</td>
+                <td>{beta_cdr3}</td>
+                <td class="sequence">{beta_nt_display}</td>
                 <td>{row.get('peptide', 'N/A')}</td>
                 <td class="{binding_class}">{row.get('binding_score', 0):.3f}</td>
                 <td>{row.get('confidence', 0):.3f}</td>
@@ -205,6 +249,7 @@ def generate_tcr_report(ranked_tcrs, output_file, top_n=20):
     html_content += """
         </table>
         <p>注：结合评分表示TCR与肽段的结合亲和力；结构评分表示TCR-pMHC复合物的结构质量；Treg质量表示调节性T细胞的功能特性。</p>
+        <p>注：为了显示清晰，较长的核苷酸序列已被截断，完整序列可在CSV文件中查看。</p>
     </body>
     </html>
     """
